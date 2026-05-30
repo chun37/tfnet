@@ -1,0 +1,36 @@
+[Unit]
+Description=tfnet L2 VPN (%i)
+Documentation=https://github.com/tfnet/tfnet
+After=network-online.target frr.service
+Wants=network-online.target
+PartOf=frr.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Edit /etc/default/tfnet to set TFNET_OPTS, e.g.:
+#   TFNET_OPTS=-ledger /var/lib/tfnet/ledger -wg-key /etc/tfnet/wg.json -asn 65010
+EnvironmentFile=-/etc/default/tfnet
+
+# %i is the instance name (everything after the '@' in tfnet@alice.service).
+# We pass it as the -self node_id so a single host can in principle hold
+# multiple identities (rare, but the design doesn't forbid it).
+ExecStart=/usr/local/bin/tfnet start -self %i $TFNET_OPTS
+ExecStop=/usr/local/bin/tfnet stop  -self %i $TFNET_OPTS
+
+# tfnet itself does not background; start/stop are short-lived orchestrators
+# that act on wg-quick / ip link / vtysh. The actual data plane lives in
+# the kernel and FRR.
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+# Hardening (minimal: we have to touch the network namespace + /etc/wireguard)
+ProtectSystem=full
+ProtectHome=true
+NoNewPrivileges=true
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_OVERRIDE
+
+[Install]
+WantedBy=multi-user.target

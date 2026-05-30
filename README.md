@@ -7,15 +7,17 @@ WireGuard / FRR 設定を台帳から生成する CLI。
 
 ## このリポジトリで実装する範囲
 
-| 設計書のレイヤー                  | tfnet が担う？                                                          |
-| --------------------------------- | ----------------------------------------------------------------------- |
-| §3 メンバーシップ台帳（認可）     | **Yes** — 提案 / 署名収集 / 確定 / replay / 検証                        |
-| §4 WireGuard トランスポート        | **設定生成のみ** — `tfnet render wg` が wg-quick 互換 conf を出力       |
-| §5 VXLAN/EVPN                      | **設定生成のみ** — `tfnet render frr` が FRR 用 vtysh 互換 conf を出力 |
-| §4.4 NAT ホールパンチ / リレー     | スコープ外（§8「要確定」項目）                                          |
-| §5.2 VXLAN/bridge/netns の構築     | スコープ外（`ip` コマンド / systemd-networkd で別途）                  |
-| §6 MTU                              | render wg の `-mtu` フラグで指定（既定 1440）                          |
-| §7 BFD                              | render frr に既定で出力（300ms × 3）                                    |
+| 設計書のレイヤー                   | tfnet が担う？                                                                  |
+| ---------------------------------- | ------------------------------------------------------------------------------- |
+| §3 メンバーシップ台帳（認可）       | **Yes** — 提案 / 署名収集 / 確定 / replay / 検証                                |
+| §4 WireGuard トランスポート          | **Yes** — `tfnet start` が wg-quick で up/down、生成 conf も同時に書き出す      |
+| §5 VXLAN/EVPN/bridge                | **Yes** — `tfnet start` が `ip link` + `bridge` + FRR reload を冪等に実行       |
+| §4.4 NAT ホールパンチ / リレー       | スコープ外（§8「要確定」項目、シグナリングプロトコル未定）                       |
+| §5.4 network namespace 分離         | スコープ外（推奨仕様だが本実装は root netns 前提。後日 `-netns` で拡張予定）    |
+| §6 MTU                               | `-wg-mtu` / `-overlay-mtu` で指定（既定 1440 / 1390 = wg-mtu - 50）             |
+| §7 BFD                               | render/start とも既定で出力（300ms × 3）                                        |
+| 依存パッケージのインストール          | `setup.sh`（apt/dnf/pacman 対応、FRR の bgpd/bfdd 有効化、モジュール永続化）   |
+| systemd 統合                          | `contrib/tfnet@.service` テンプレート（`tfnet@<node_id>.service`）             |
 
 ## 設計書からの差分（明示）
 
@@ -24,7 +26,24 @@ WireGuard / FRR 設定を台帳から生成する CLI。
 `identity_pubkey`（Ed25519）を追加した。同一の鍵を ECDH と署名の両方に使うのは
 暗号学的に好ましくないため、別の keypair として運用する。
 
-## ビルド
+## セットアップ
+
+依存パッケージの導入とビルドはまとめて `setup.sh` で:
+
+```sh
+./setup.sh                 # 依存インストール + ./tfnet をビルド
+INSTALL=1 ./setup.sh       # 加えて /usr/local/bin/tfnet にインストール
+SYSTEMD=1 ./setup.sh       # 加えて contrib/tfnet@.service を /etc/systemd/system に配置
+```
+
+これがやること:
+
+- `wireguard` / `wireguard-tools` / `frr` / `frr-pythontools` / `iproute2` / `jq` を導入
+- `/etc/frr/daemons` で `bgpd` と `bfdd` を有効化し FRR を再起動
+- `wireguard` と `vxlan` カーネルモジュールをロード + `/etc/modules-load.d/tfnet.conf` で永続化
+- `go build -o tfnet ./cmd/tfnet`
+
+開発時はこの手前で:
 
 ```sh
 go build ./...
@@ -60,10 +79,78 @@ tfnet ledger sign -key alice.id.json "$PENDING"
 tfnet ledger sign -key bob.id.json   "$PENDING"
 tfnet ledger commit "$PENDING"
 
-# 4. 各ノードで設定を生成
+# 4a. (確認用) 設定ファイルを手で見たい場合
 tfnet render wg  -self alice -wg-key alice.wg.json -listen-port 51820 -mtu 1440 -out wg0.conf
 tfnet render frr -self alice -asn 65010 -out frr.conf
+
+# 4b. (本番) 一発で wg/vxlan/bridge/FRR を立ち上げる
+sudo tfnet start -self alice -wg-key alice.wg.json -listen-port 51820 -asn 65010
+sudo tfnet status -self alice
+sudo tfnet stop -self alice
 ```
+
+## start / stop / status
+
+`tfnet start` は台帳と自分の wg 鍵から:
+
+1. WireGuard conf を `/etc/wireguard/<wg-iface>.conf` に書き出して `wg-quick up`
+2. VXLAN デバイスを作成（`type vxlan id <VNI> dstport 4789 local <self_overlay> nolearning`）
+3. ブリッジを作成し VXLAN を attach
+4. §5.2 のブリッジ設定（`bridge link set ... neigh_suppress on learning off`）
+5. MTU を §6.1 に従い設定（wg=1440, vxlan/bridge=1390）
+6. FRR conf を書き出して `systemctl reload-or-restart frr`
+
+までを冪等に実行します。既に立っているインターフェースは作り直さず、wg のピア
+変更は `wg syncconf` でホットリロードします。
+
+`tfnet stop` は逆順:
+
+1. `vtysh` で `no router bgp <ASN>` / `no bfd` を流し FRR の該当セッションだけを除去
+2. VXLAN / bridge / wg 各インターフェースを削除
+
+`tfnet status` は `wg show <iface> dump` と `vtysh -c "show bgp l2vpn evpn summary"` を使って、
+ピアのハンドシェイク時刻・転送量・BGP/EVPN セッション状態を一覧表示します。
+
+### よく使うフラグ
+
+| フラグ              | 既定値                       | 説明                                       |
+| ------------------- | ---------------------------- | ------------------------------------------ |
+| `-self <id>`        | （必須: start, status）       | このホストの node_id                       |
+| `-wg-key <file>`    | （必須: start）              | wg 秘密鍵 JSON（`keys gen-wg` の出力）     |
+| `-ledger <dir>`     | `$TFNET_LEDGER` か `./ledger` | 台帳ディレクトリ                           |
+| `-asn <n>`          | `65010`                      | iBGP プライベート ASN                       |
+| `-wg-iface <name>`  | `tfnet0`                     | WireGuard インターフェース名                |
+| `-vxlan-iface`      | `tfvx0`                      | VXLAN デバイス名                            |
+| `-bridge-iface`     | `tfbr0`                      | ブリッジ名                                  |
+| `-vni <n>`          | `10000`                      | VXLAN VNI                                   |
+| `-wg-mtu <n>`       | `1440`                       | wg インターフェース MTU（§6）              |
+| `-overlay-mtu <n>`  | `wg-mtu - 50`                | vxlan/bridge MTU                            |
+| `-listen-port <n>`  | エフェメラル                   | WireGuard ListenPort                        |
+| `-skip-frr`         | `false`                      | FRR を触らない（wg + vxlan のみ）           |
+| `-dry-run`          | `false`                      | 全コマンドをログに出すだけで実行しない        |
+
+### dry-run
+
+`-dry-run` を付けると、書き込もうとしているファイル・実行しようとしている
+`ip` / `wg-quick` / `bridge` / `systemctl` / `vtysh` のコマンドが全て slog に出ます。
+root 権限がない環境で出力を眺めるのに便利:
+
+```sh
+tfnet start -self alice -wg-key alice.wg.json -dry-run
+```
+
+### systemd で常駐させる
+
+```sh
+SYSTEMD=1 ./setup.sh
+sudo cp contrib/tfnet.env.example /etc/default/tfnet
+sudo vi /etc/default/tfnet              # TFNET_OPTS を編集
+sudo systemctl enable --now tfnet@alice
+sudo systemctl status  tfnet@alice
+```
+
+`%i`（インスタンス名）が `-self` に渡されるので、`tfnet@alice.service` /
+`tfnet@bob.service` のように node_id ごとにユニットを起動できる。
 
 ### メンバー追加（N-of-N）
 
@@ -176,9 +263,8 @@ ledger/
 
 ## やっていないこと（運用前提）
 
-- **WireGuard の起動**: 生成された conf を `wg-quick up wg0` 等で適用する必要がある。
-- **VXLAN / bridge / netns**: 設計書 §5.2, §5.4 に従い別途 `ip` コマンドや
-  systemd-networkd で構築する。`tfnet` はこのレイヤーには関与しない。
-- **FRR の起動**: `frr.conf` を `/etc/frr/` に置いて `vtysh -b` で読ませる。
-- **NAT ホールパンチ / リレー**: §4.4・§8 の「要確定」項目。本実装にはない。
-- **エンドポイントのローミング配布**: 設計書通り WireGuard 側に任せる前提。
+- **NAT ホールパンチ / リレー**: §4.4・§8 の「要確定」項目。シグナリングプロトコルが未確定なので未実装。
+  当面は A 区分（グローバル IP を持つノード）間または A-B（B が A へ発呼）のみ繋がる前提。
+- **network namespace 分離**: 設計書 §5.4 は推奨だが、wg-quick の netns サポートが限定的なので
+  root netns 前提とした。将来 `-netns` フラグで拡張する余地は残している。
+- **エンドポイントのローミング配布**: 設計書通り WireGuard 側に任せる（`endpoint` は §3.4 に従い署名対象外）。

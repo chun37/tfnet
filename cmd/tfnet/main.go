@@ -112,6 +112,10 @@ Commands:
     wg            Render wg-quick config for SELF
     frr           Render FRR (BGP/EVPN/BFD) config for SELF
 
+  start     Bring the overlay up on this host (wg-quick + ip link + FRR reload)
+  stop      Tear the overlay down
+  status    Show wg / vxlan / bridge / BGP-EVPN state
+
 Global flags (must precede the subcommand):
   -log-level  debug|info|warn|error (default info)
   -log-format text|json             (default text)
@@ -146,6 +150,12 @@ func main() {
 		runLedger(rest[1:])
 	case "render":
 		runRender(rest[1:])
+	case "start":
+		runStart(rest[1:])
+	case "stop":
+		runStop(rest[1:])
+	case "status":
+		runStatus(rest[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:
