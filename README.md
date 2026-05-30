@@ -344,6 +344,24 @@ tfnet sync [-repo PATH] [-branch main] [-self ID] [-hooks-dir DIR]
 **非 fast-forward な pull は既定で拒否**（force push を防ぐ）。`-allow-non-ff` で
 明示的に許可可能だがコミット履歴の改竄を見逃すので非推奨。
 
+> **GitHub の branch protection が無い環境**（free plan の personal private repo
+> など）でもこの ff-only 拒否がクライアント側の防御線として機能する。force push が
+> あれば各ホストの `tfnet sync` は exit 1 で止まり `error` フックが発火する。
+> 既存の overlay は引き続き動く（台帳がローカルに残っているため）ので、慌てず
+> 上流を確認すること。
+
+### 上流が force-push されたっぽいとき
+
+各ホストで `sync.failed` の audit / `error` フックの通知を受けたら:
+
+1. **既存の overlay は触らない**（古い台帳でそのまま動き続けている）
+2. 上流 repo の `git reflog` を確認し、誰がいつ force push したか特定
+3. 正規メンバーによる事故なら、それぞれのホストで
+   `git -C <repo> reset --hard origin/main` を打って上流に合わせる（このとき
+   `tfnet ledger verify` で台帳の整合性を必ず確認してから）
+4. 悪意ある force push の疑いがあるなら、即座に該当アカウントへの push 権限を
+   剥奪し、当該コミット以降を `propose-remove` で台帳から外す
+
 ### フックに渡る環境変数
 
 | 変数               | 内容                                                       |

@@ -6,3 +6,6 @@
 /ledger/
 *.id.json
 *.wg.json
+
+# Claude Code project settings (local-only; do not share)
+/.claude/
