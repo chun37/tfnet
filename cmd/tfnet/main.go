@@ -109,6 +109,8 @@ Commands:
     sign          Sign a pending entry (in place)
     merge         Merge external signatures into a pending entry
     show          Show a pending entry with required/missing approvers
+    pending       List every pending entry with required/missing approvers
+    approve       Pick a pending interactively, sign, (auto-)commit, git push
     commit        Validate a fully-signed pending entry and append to the log
     list          List committed entries
     members       List current members

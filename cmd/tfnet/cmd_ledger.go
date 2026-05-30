@@ -34,6 +34,10 @@ func runLedger(args []string) {
 		runLedgerMerge(args[1:])
 	case "show":
 		runLedgerShow(args[1:])
+	case "pending":
+		runLedgerPending(args[1:])
+	case "approve":
+		runLedgerApprove(args[1:])
 	case "commit":
 		runLedgerCommit(args[1:])
 	case "list":

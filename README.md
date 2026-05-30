@@ -268,6 +268,61 @@ tfnet ledger commit ledger/pending/000001-*/
 git add ledger && git commit -m "commit: add carol" && git push
 ```
 
+### 簡略版: `tfnet ledger approve`
+
+毎回 `pull → sign → add → commit → push` を打つのが面倒なら、ホスト固有設定を
+1 回だけ用意して `approve` 1 コマンドで済ませられる。
+
+`$XDG_CONFIG_HOME/tfnet/config.json`（root なら `/etc/tfnet/config.json`）:
+
+```json
+{
+  "self":         "alice",
+  "identity_key": "/etc/tfnet/alice.id.json",
+  "repo":         "/var/lib/tfnet/repo",
+  "branch":       "main",
+  "remote":       "origin"
+}
+```
+
+以後の承認フロー（alice / bob / carol それぞれで同じ）:
+
+```sh
+# 未処理の pending 一覧を見る
+tfnet ledger pending
+# [1] 000001-1e16464abc  ADD     carol       alice,bob   (none)
+# ...
+
+# 番号で選んで承認 → 自動で sign + (揃ったら) ledger commit + git push
+tfnet ledger approve
+# pick a pending [1-1] (q to quit): 1
+# approve 000001-1e16464abc (ADD carol) as alice [y/N]: y
+# signed 000001-1e16464abc as alice
+# pushed: ledger: sign ADD carol as alice
+```
+
+`approve` が裏でやっていること:
+
+1. `git fetch && git merge --ff-only`（`-no-pull` で抑制可）
+2. pending 一覧を表示して番号入力を受け取る（`-pending <name>` または `-yes` で対話省略）
+3. `<self>` の identity 鍵で sign（`config.json` の `identity_key`、あるいは `-key`、あるいは `/etc/tfnet/<self>.id.json` の順で探索）
+4. 自分の署名で全員揃ったなら `ledger commit`（log.jsonl に append、pending dir 削除）
+5. `git add ledger && git commit && git push`。`rejected (non-fast-forward)` なら自動で `git pull --rebase` してリトライ
+
+非対話で叩きたいときは:
+
+```sh
+tfnet ledger approve -pending 000001 -yes
+```
+
+全自動の挙動を一部だけ切りたいときのフラグ:
+
+| フラグ           | 効果                                                 |
+| ---------------- | ---------------------------------------------------- |
+| `-no-pull`       | 冒頭の `git fetch + merge --ff-only` をスキップ     |
+| `-no-finalize`   | 全署名が揃っても `ledger commit` はしない（署名だけ）|
+| `-no-push`       | git の add/commit/push を一切やらない（手動 push 用）|
+
 ### carol が初めて起動
 
 ```sh
