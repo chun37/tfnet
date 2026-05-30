@@ -57,6 +57,9 @@ repo に入るもの: `ledger/log.jsonl` と `ledger/pending/*/` のみ。
 | §4.4 NAT ホールパンチ/リレー        | スコープ外（§8 要確定）                                                          |
 | §5.4 netns 分離                      | スコープ外（root netns 前提、将来拡張）                                         |
 
+署名フローの図解（add / remove / genesis / commit 検証の 4 つ）は
+[docs/signing-sequence.md](./docs/signing-sequence.md) を参照。
+
 ## 設計書からの差分（明示）
 
 設計書 §3.1 の Subject は `wg_pubkey`（Curve25519）しか持たないが、台帳エントリの
