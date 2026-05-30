@@ -18,46 +18,48 @@
 必要署名者 = `M_after = M_before ∪ {carol} = {alice, bob, carol}`（**新メンバーも自分の
 参加に同意する署名が必要**）。
 
+本実装では **新参 carol が自分の参加提案を自分で push する** フローを既定とする
+（`tfnet ledger propose-self-add`）。公開鍵を既存メンバーに送って転記してもらう
+ハンドオフが不要になり、`identity_pubkey` の取り違え事故も起こらない。代理提案
+（`propose-add`）の経路も残してあるので、carol が push 権限を持たない場合は
+既存メンバーが代行できる（下の補足を参照）。
+
 ```mermaid
 sequenceDiagram
     autonumber
     actor C as carol<br/>(新参)
-    actor A as alice<br/>(提案者 / 既存)
+    actor A as alice<br/>(既存)
     actor B as bob<br/>(既存)
     participant R as GitHub<br/>(private repo)
 
     Note over C: tfnet keys gen-identity<br/>tfnet keys gen-wg<br/>(秘密鍵はローカルのみ)
-    C->>A: 公開鍵 + 希望 overlay_ip<br/>(信頼経路不要)
 
     rect rgb(240, 245, 255)
-        Note over A: --- 提案フェーズ ---
-        A->>A: tfnet ledger propose-add
-        Note over A: entry = {seq, prev_hash,<br/>op=ADD, subject=carol}<br/>→ pending/0003-1e16/entry.json
-        A->>A: tfnet ledger sign -key alice.id.json
-        Note over A: h = SHA256(canonical(entry))<br/>sig = Ed25519_sign(alice_priv, h)<br/>→ sigs/alice.json
-        A->>R: git push
+        Note over C: --- 提案フェーズ (carol 主導) ---
+        C->>R: git clone
+        C->>C: tfnet ledger propose-self-add<br/>-id-key carol.id.json<br/>-wg-key carol.wg.json<br/>-overlay-ip 10.99.0.3/32
+        Note over C: 鍵ファイルから node_id /<br/>identity_pubkey / wg_pubkey を抽出<br/>→ entry = {seq, prev_hash,<br/>op=ADD, subject=carol}<br/>→ pending/0003-1e16/entry.json<br/>同じ識別鍵で自署も同時に書く<br/>→ sigs/carol.json
+        C->>R: git push
     end
 
     rect rgb(240, 255, 240)
-        Note over B,C: --- 署名フェーズ (並列 OK) ---
-        par bob
-            B->>R: git pull
-            B->>B: sign -key bob.id.json
-            Note over B: 同じ h を独立計算<br/>→ sigs/bob.json
+        Note over A,B: --- 承認フェーズ (並列 OK) ---
+        par alice
+            A->>R: tfnet ledger approve (内部で git pull)
+            Note over A: 同じ h を独立計算<br/>sig = Ed25519_sign(alice_priv, h)<br/>→ sigs/alice.json
+            A->>R: git push
+        and bob
+            B->>R: tfnet ledger approve
+            Note over B: → sigs/bob.json
             B->>R: git push
-        and carol
-            C->>R: git clone / pull
-            C->>C: sign -key carol.id.json
-            Note over C: 新メンバーも自身の<br/>参加同意を署名する<br/>→ sigs/carol.json
-            C->>R: git push
         end
         Note over R: 各員のファイルは別パス<br/>→ merge 衝突なし
     end
 
     rect rgb(255, 250, 240)
-        Note over A: --- 確定フェーズ ---
-        A->>R: git pull
-        A->>A: tfnet ledger commit
+        Note over A,B: --- 確定フェーズ ---
+        Note over A,B: 最後に approve した側が<br/>必要署名揃ったことを検知して<br/>そのまま ledger-commit + push<br/>(approve の -no-finalize で抑制可)
+        A->>R: tfnet ledger commit (auto)
         Note over A: 1. h を再計算 (改竄検出)<br/>2. 必要署名者集合 R を導出<br/>3. ∀id ∈ R: ed25519.Verify(pk_id, h, sig_id)<br/>4. log.jsonl に append, pending/ を削除
         A->>R: git push
     end
@@ -70,6 +72,12 @@ sequenceDiagram
         Note over C: 初回 tfnet start で<br/>overlay に参加
     end
 ```
+
+> **代理提案ルート (`propose-add`) を取るとき**: carol に push 権限を渡さない／carol の手元に
+> tfnet を入れたくない場合は、既存メンバーが `tfnet ledger propose-add -node-id ... -identity-pubkey ...
+> -wg-pubkey ... -overlay-ip ...` で代行する。carol は別経路（`tfnet ledger sign -out` で出した
+> detached 署名ファイル）を Slack 等で送り、提案者が `tfnet ledger merge` で取り込む。
+> 安全性は同じ（commit 時に N-of-N の署名検証は同様に走る）。
 
 ---
 

@@ -26,6 +26,8 @@ func runLedger(args []string) {
 		runLedgerGenesis(args[1:])
 	case "propose-add":
 		runLedgerProposeAdd(args[1:])
+	case "propose-self-add":
+		runLedgerProposeSelfAdd(args[1:])
 	case "propose-remove":
 		runLedgerProposeRemove(args[1:])
 	case "sign":
@@ -171,6 +173,9 @@ func runLedgerProposeAdd(args []string) {
 	if _, dup := state.Members[*nodeID]; dup {
 		die("propose-add: %s is already a member", *nodeID)
 	}
+	if existing := state.MemberByOverlayIP(*overlay); existing != "" {
+		die("propose-add: overlay_ip %s already used by member %s", *overlay, existing)
+	}
 	e := &ledger.Entry{
 		Seq:      state.NextSeq,
 		PrevHash: hex32(state.PrevHash),
@@ -202,6 +207,119 @@ func runLedgerProposeAdd(args []string) {
 	})
 	fmt.Printf("add proposed: %s\n", path)
 	printRequired(state, e)
+}
+
+// ---- propose-self-add ----
+//
+// The new joiner's self-service variant: read node_id / identity_pubkey from
+// the identity key file and wg_pubkey from the WireGuard key file, write the
+// proposal, and append the new member's own signature in one step.
+//
+// After this, the new joiner just needs `git add && git commit && git push`.
+// Existing members then `tfnet ledger approve` to add their signatures and
+// finalise -- no public-key transcription on either side.
+
+func runLedgerProposeSelfAdd(args []string) {
+	fs := flag.NewFlagSet("ledger propose-self-add", flag.ExitOnError)
+	dir := fs.String("ledger", "", "ledger directory")
+	idKeyPath := fs.String("id-key", "", "self identity key file (required)")
+	wgKeyPath := fs.String("wg-key", "", "self WireGuard key file (required)")
+	overlay := fs.String("overlay-ip", "", "self overlay IP, CIDR (required, e.g. 10.99.0.5/32)")
+	endpoint := fs.String("endpoint", "", "optional endpoint hint (ip:port); excluded from signature")
+	nodeIDFlag := fs.String("node-id", "", "optional: expected node_id; rejects if id-key disagrees")
+	_ = fs.Parse(args)
+	if *idKeyPath == "" || *wgKeyPath == "" || *overlay == "" {
+		die("ledger propose-self-add: -id-key, -wg-key and -overlay-ip are required")
+	}
+	id, err := keys.LoadIdentity(*idKeyPath)
+	if err != nil {
+		die("load identity %s: %v", *idKeyPath, err)
+	}
+	if *nodeIDFlag != "" && *nodeIDFlag != id.NodeID {
+		die("propose-self-add: -node-id is %q but id-key is for %q", *nodeIDFlag, id.NodeID)
+	}
+	wg, err := keys.LoadWGKey(*wgKeyPath)
+	if err != nil {
+		die("load wg key %s: %v", *wgKeyPath, err)
+	}
+	st := openStore(ledgerDir(*dir))
+	state := replay(st)
+	if _, dup := state.Members[id.NodeID]; dup {
+		die("propose-self-add: %s is already a member", id.NodeID)
+	}
+	if existing := state.MemberByOverlayIP(*overlay); existing != "" {
+		die("propose-self-add: overlay_ip %s already used by member %s", *overlay, existing)
+	}
+	e := &ledger.Entry{
+		Seq:      state.NextSeq,
+		PrevHash: hex32(state.PrevHash),
+		Op:       ledger.OpAdd,
+		Subject: &ledger.Subject{
+			NodeID:         id.NodeID,
+			IdentityPubkey: id.PublicKey,
+			WGPubkey:       wg.PublicKey,
+			OverlayIP:      *overlay,
+			Endpoint:       *endpoint,
+		},
+		Approvals: map[string]string{},
+	}
+	h, err := e.Hash()
+	if err != nil {
+		die("invalid entry: %v", err)
+	}
+	path, err := st.SavePending(e)
+	if err != nil {
+		die("save pending: %v", err)
+	}
+	hexHash := hex32(h)
+	audit.Log(audit.Event{LedgerDir: st.Dir,
+		Action:    "ledger.propose.add",
+		Seq:       audit.Seq(e.Seq),
+		Op:        string(ledger.OpAdd),
+		Target:    id.NodeID,
+		EntryHash: hexHash,
+		Details:   map[string]any{"pending_path": path, "overlay_ip": *overlay, "self_proposed": true},
+	})
+	fmt.Printf("add proposed: %s\n", path)
+
+	// Drop the new member's own signature into sigs/ so existing members only
+	// need to add theirs. The pending dir loaded from disk above already has
+	// an empty sigs/, so SaveSig writes exactly one file.
+	p, err := ledger.LoadPending(path)
+	if err != nil {
+		die("reload pending: %v", err)
+	}
+	sig, err := id.Sign(h[:])
+	if err != nil {
+		die("sign: %v", err)
+	}
+	sf := ledger.SigFile{
+		NodeID:    id.NodeID,
+		EntryHash: hexHash,
+		Signature: base64.StdEncoding.EncodeToString(sig),
+	}
+	if err := p.SaveSig(sf); err != nil {
+		die("save sig: %v", err)
+	}
+	audit.Log(audit.Event{LedgerDir: st.Dir,
+		Action:    "ledger.sign.inplace",
+		Actor:     id.NodeID,
+		EntryHash: hexHash,
+		Details: map[string]any{
+			"pending_path": path,
+			"sig_path":     p.SigFilePath(id.NodeID),
+			"via":          "propose-self-add",
+		},
+	})
+	tflog.Info("sign", "node_id", id.NodeID, "entry_hash", hexHash, "pending", path)
+	fmt.Printf("signed %s as %s (-> %s)\n", path, id.NodeID, p.SigFilePath(id.NodeID))
+
+	reloaded, err := ledger.LoadPending(path)
+	if err != nil {
+		printRequired(state, e)
+		return
+	}
+	printRequired(state, reloaded.Entry)
 }
 
 // ---- propose-remove ----

@@ -64,6 +64,21 @@ func (n *testNode) Sign(t *testing.T, e *ledger.Entry) {
 	e.Approvals[n.NodeID] = base64.StdEncoding.EncodeToString(sig)
 }
 
+func TestMemberByOverlayIP(t *testing.T) {
+	a := newTestNode(t, "alice", "10.99.0.1/32")
+	b := newTestNode(t, "bob", "10.99.0.2/32")
+	s := ledger.NewState()
+	s.Members[a.NodeID] = a.Subject()
+	s.Members[b.NodeID] = b.Subject()
+
+	if got := s.MemberByOverlayIP("10.99.0.2/32"); got != "bob" {
+		t.Errorf("hit: got %q, want bob", got)
+	}
+	if got := s.MemberByOverlayIP("10.99.0.99/32"); got != "" {
+		t.Errorf("miss: got %q, want empty", got)
+	}
+}
+
 func TestCanonicalHashStability(t *testing.T) {
 	n := newTestNode(t, "alice", "10.99.0.1/32")
 	e1 := &ledger.Entry{

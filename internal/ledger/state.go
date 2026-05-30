@@ -32,6 +32,18 @@ func (s *State) MemberIDs() []string {
 	return ids
 }
 
+// MemberByOverlayIP returns the node_id of the member whose overlay_ip matches
+// the argument, or "" if none. Used by propose-* to fail fast on IP collisions
+// rather than waiting until commit-time replay would catch them.
+func (s *State) MemberByOverlayIP(ip string) string {
+	for id, m := range s.Members {
+		if m.OverlayIP == ip {
+			return id
+		}
+	}
+	return ""
+}
+
 // RequiredApprovers returns the node_ids that MUST sign the given entry per
 // the N-of-N rule (§3.2), evaluated against the receiver's current state.
 //

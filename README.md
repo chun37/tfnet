@@ -197,62 +197,66 @@ sudo tfnet status -self <name>
 
 ---
 
-## メンバー追加: carol の参加（三者視点）
+## メンバー追加: carol の参加（新参主導）
 
 既存メンバー alice / bob と、新参 carol。carol は **既に repo へ push できる
 GitHub アカウント** を持っているとする（branch protection で main 直 push を禁止し、
 PR レビューで承認する運用もあり）。
 
+設計の要点は **carol が自分の参加提案を自分で push する** こと。既存メンバーは
+公開鍵を受け取って `propose-add` を打つ必要がなく、ただ `approve` するだけで済む。
+公開鍵のコピペ転記が発生しないので、`identity_pubkey` を取り違える事故も起こらない。
+
 ### carol の手元
 
 ```sh
-# 1. 鍵生成
+# 1. 鍵生成（秘密鍵はローカルにのみ残す）
 tfnet keys gen-identity -node-id carol -out /etc/tfnet/carol.id.json
 tfnet keys gen-wg                       -out /etc/tfnet/carol.wg.json
 
-# 2. 公開情報を提案者に渡す（メール / Slack / 何でもいい — 信頼性不要）
-tfnet keys pub -in /etc/tfnet/carol.id.json   # identity 公開鍵
-tfnet keys pub -in /etc/tfnet/carol.wg.json   # wg 公開鍵
-# + 自分の希望 overlay_ip (例 10.99.0.3/32) と endpoint
-```
-
-### 提案者 alice の手元（誰でも提案できる）
-
-```sh
+# 2. repo を clone
+git clone git@github.com:our-org/tfnet-ledger.git /var/lib/tfnet/repo
 cd /var/lib/tfnet/repo
-git pull --ff-only
 
-tfnet ledger propose-add \
-    -node-id carol \
-    -identity-pubkey "<carol-id-pub>" \
-    -wg-pubkey       "<carol-wg-pub>" \
+# 3. 自己提案 + 自署をワンショットで
+tfnet ledger propose-self-add \
+    -id-key /etc/tfnet/carol.id.json \
+    -wg-key /etc/tfnet/carol.wg.json \
     -overlay-ip 10.99.0.3/32 \
     -endpoint 203.0.113.3:51820
 # -> ledger/pending/000001-<hash>/entry.json
+#    ledger/pending/000001-<hash>/sigs/carol.json   (自署も同時に書く)
 
-git add ledger && git commit -m "propose: add carol" && git push
+# 4. push
+git add ledger && git commit -m "propose: self-add carol" && git push
 ```
 
-ADD は **既存メンバー全員 ∪ {新メンバー}** の署名が必要 → alice / bob / carol の 3 人。
+`propose-self-add` がやっていること:
 
-### 各メンバーが署名（順序自由、並列 OK）
+1. `-id-key` から `node_id` と `identity_pubkey` を読み取る
+2. `-wg-key` から `wg_pubkey` を読み取る
+3. 既存メンバーと **node_id / overlay_ip / 公開鍵** が衝突していないか検査
+4. `ledger/pending/<seq>-<hash>/entry.json` を書く
+5. 同じ identity 鍵で自署して `sigs/<node_id>.json` を置く
+
+ADD は **既存メンバー全員 ∪ {新メンバー}** の署名が必要 → alice / bob / carol の 3 人。
+carol 分は手順 5 で既に書かれているので、残りは alice / bob の署名だけ。
+
+> **代理提案ルートも残してある**: carol に push 権限を渡したくない／carol が手元で
+> tfnet を持っていない、というケースでは従来通り既存メンバーが `tfnet ledger propose-add
+> -node-id ... -identity-pubkey ... -wg-pubkey ... -overlay-ip ...` で代理できる。
+> その場合 carol は別ルートで sig だけ送る（`tfnet ledger sign -out` の detached 署名）。
+
+### 既存メンバーが承認（順序自由、並列 OK）
 
 ```sh
 # alice
-cd /var/lib/tfnet/repo && git pull --ff-only
-tfnet ledger sign -key /etc/tfnet/alice.id.json ledger/pending/000001-*/
-git add ledger && git commit -m "alice signs add-carol" && git push
+cd /var/lib/tfnet/repo
+tfnet ledger approve            # 対話で pending 一覧から選ぶ → 自署 + 必要なら finalize + push
 
 # bob (別ホストで並列に)
-cd /var/lib/tfnet/repo && git pull --ff-only
-tfnet ledger sign -key /etc/tfnet/bob.id.json ledger/pending/000001-*/
-git add ledger && git commit -m "bob signs add-carol" && git push
-
-# carol (まだメンバーじゃないが、新参として参加同意の署名)
-git clone git@github.com:our-org/tfnet-ledger.git /var/lib/tfnet/repo
 cd /var/lib/tfnet/repo
-tfnet ledger sign -key /etc/tfnet/carol.id.json ledger/pending/000001-*/
-git add ledger && git commit -m "carol signs add-carol" && git push
+tfnet ledger approve
 ```
 
 > **並列 push のときに `git push` が「rejected (non-fast-forward)」になったら**

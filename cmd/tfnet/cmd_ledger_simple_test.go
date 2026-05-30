@@ -269,6 +269,231 @@ func TestApprove_E2E(t *testing.T) {
 	}
 }
 
+// ---------- propose-self-add ---------------------------------------------
+
+// TestProposeSelfAdd_E2E drives the built binary end-to-end: a committed
+// 2-member genesis exists, then carol runs `tfnet ledger propose-self-add` and
+// we verify the pending entry + carol's own signature are on disk and the
+// signature actually verifies against the canonical entry hash.
+func TestProposeSelfAdd_E2E(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	aliceKey, _ := newSignerKey(t, "alice")
+	bobKey, _ := newSignerKey(t, "bob")
+
+	ledgerDir := filepath.Join(root, "ledger")
+	st := &ledger.Store{Dir: ledgerDir}
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	gen := &ledger.Entry{
+		Seq: 0, PrevHash: ledger.ZeroHash, Op: ledger.OpGenesis,
+		Subjects: []ledger.Subject{
+			subjectFromKey(t, aliceKey, "10.99.0.1/32"),
+			subjectFromKey(t, bobKey, "10.99.0.2/32"),
+		},
+	}
+	h, _ := gen.Hash()
+	gen.Approvals = map[string]string{
+		"alice": ed25519Sig(t, aliceKey, h[:]),
+		"bob":   ed25519Sig(t, bobKey, h[:]),
+	}
+	state := ledger.NewState()
+	if err := state.Apply(gen); err != nil {
+		t.Fatalf("apply genesis: %v", err)
+	}
+	if err := st.Append(gen); err != nil {
+		t.Fatal(err)
+	}
+
+	carolID, err := keys.GenerateIdentity("carol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	carolIDPath := filepath.Join(root, "carol.id.json")
+	if err := carolID.Save(carolIDPath); err != nil {
+		t.Fatal(err)
+	}
+	carolWG, err := keys.GenerateWGKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	carolWGPath := filepath.Join(root, "carol.wg.json")
+	if err := carolWG.Save(carolWGPath); err != nil {
+		t.Fatal(err)
+	}
+
+	bin := filepath.Join(root, "tfnet")
+	mustRunDir(t, "go", "build", "-o", bin, ".")
+
+	cmd := exec.Command(bin, "ledger", "propose-self-add",
+		"-ledger", ledgerDir,
+		"-id-key", carolIDPath,
+		"-wg-key", carolWGPath,
+		"-overlay-ip", "10.99.0.3/32",
+		"-endpoint", "203.0.113.3:51820",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("propose-self-add failed: %v\noutput:\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "add proposed") {
+		t.Errorf("expected 'add proposed' in output; got:\n%s", out)
+	}
+	if !strings.Contains(string(out), "signed") {
+		t.Errorf("expected 'signed ...' in output; got:\n%s", out)
+	}
+
+	pendings, err := listPendings(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pendings) != 1 {
+		t.Fatalf("expected 1 pending, got %d", len(pendings))
+	}
+	p := pendings[0]
+	if p.Entry.Op != ledger.OpAdd || p.Entry.Subject == nil || p.Entry.Subject.NodeID != "carol" {
+		t.Fatalf("unexpected entry: %+v", p.Entry)
+	}
+	if p.Entry.Subject.IdentityPubkey != carolID.PublicKey {
+		t.Errorf("identity_pubkey: got %q, want %q",
+			p.Entry.Subject.IdentityPubkey, carolID.PublicKey)
+	}
+	if p.Entry.Subject.WGPubkey != carolWG.PublicKey {
+		t.Errorf("wg_pubkey: got %q, want %q",
+			p.Entry.Subject.WGPubkey, carolWG.PublicKey)
+	}
+	if p.Entry.Subject.OverlayIP != "10.99.0.3/32" {
+		t.Errorf("overlay_ip: got %q, want 10.99.0.3/32", p.Entry.Subject.OverlayIP)
+	}
+
+	// carol's signature must be present and verify against the entry hash.
+	sigB64, ok := p.Entry.Approvals["carol"]
+	if !ok {
+		t.Fatalf("carol signature missing; approvals=%v", p.Entry.Approvals)
+	}
+	eh, _ := p.Entry.Hash()
+	sig, err := base64.StdEncoding.DecodeString(sigB64)
+	if err != nil {
+		t.Fatalf("decode sig: %v", err)
+	}
+	pubBytes, _ := base64.StdEncoding.DecodeString(carolID.PublicKey)
+	if !ed25519.Verify(ed25519.PublicKey(pubBytes), eh[:], sig) {
+		t.Fatalf("carol sig does not verify against entry hash")
+	}
+
+	// Remaining required signers should be alice and bob only.
+	miss, _ := state.MissingApprovers(p.Entry)
+	wantMiss := map[string]bool{"alice": true, "bob": true}
+	if len(miss) != 2 {
+		t.Fatalf("expected 2 missing approvers, got %v", miss)
+	}
+	for _, m := range miss {
+		if !wantMiss[m] {
+			t.Errorf("unexpected missing approver: %s", m)
+		}
+	}
+}
+
+// TestProposeSelfAdd_RejectsOverlayIPCollision: carol asks for the same
+// overlay_ip alice already holds. Must exit non-zero and write nothing.
+func TestProposeSelfAdd_RejectsOverlayIPCollision(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	root := t.TempDir()
+	aliceKey, _ := newSignerKey(t, "alice")
+
+	ledgerDir := filepath.Join(root, "ledger")
+	st := &ledger.Store{Dir: ledgerDir}
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	gen := &ledger.Entry{
+		Seq: 0, PrevHash: ledger.ZeroHash, Op: ledger.OpGenesis,
+		Subjects: []ledger.Subject{subjectFromKey(t, aliceKey, "10.99.0.1/32")},
+	}
+	h, _ := gen.Hash()
+	gen.Approvals = map[string]string{"alice": ed25519Sig(t, aliceKey, h[:])}
+	state := ledger.NewState()
+	if err := state.Apply(gen); err != nil {
+		t.Fatalf("apply genesis: %v", err)
+	}
+	if err := st.Append(gen); err != nil {
+		t.Fatal(err)
+	}
+
+	carolID, _ := keys.GenerateIdentity("carol")
+	carolIDPath := filepath.Join(root, "carol.id.json")
+	_ = carolID.Save(carolIDPath)
+	carolWG, _ := keys.GenerateWGKey()
+	carolWGPath := filepath.Join(root, "carol.wg.json")
+	_ = carolWG.Save(carolWGPath)
+
+	bin := filepath.Join(root, "tfnet")
+	mustRunDir(t, "go", "build", "-o", bin, ".")
+
+	cmd := exec.Command(bin, "ledger", "propose-self-add",
+		"-ledger", ledgerDir,
+		"-id-key", carolIDPath,
+		"-wg-key", carolWGPath,
+		"-overlay-ip", "10.99.0.1/32", // collision with alice
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit on overlay_ip collision; output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "overlay_ip") || !strings.Contains(string(out), "alice") {
+		t.Errorf("expected collision message naming alice; got:\n%s", out)
+	}
+	pendings, _ := listPendings(st)
+	if len(pendings) != 0 {
+		t.Errorf("expected no pending after rejection, got %d", len(pendings))
+	}
+}
+
+// TestProposeSelfAdd_RejectsNodeIDMismatch: -node-id disagrees with the
+// identity key file.
+func TestProposeSelfAdd_RejectsNodeIDMismatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	ledgerDir := filepath.Join(root, "ledger")
+	st := &ledger.Store{Dir: ledgerDir}
+	if err := st.Init(); err != nil {
+		t.Fatal(err)
+	}
+	carolID, _ := keys.GenerateIdentity("carol")
+	carolIDPath := filepath.Join(root, "carol.id.json")
+	_ = carolID.Save(carolIDPath)
+	carolWG, _ := keys.GenerateWGKey()
+	carolWGPath := filepath.Join(root, "carol.wg.json")
+	_ = carolWG.Save(carolWGPath)
+
+	bin := filepath.Join(root, "tfnet")
+	mustRunDir(t, "go", "build", "-o", bin, ".")
+
+	cmd := exec.Command(bin, "ledger", "propose-self-add",
+		"-ledger", ledgerDir,
+		"-id-key", carolIDPath,
+		"-wg-key", carolWGPath,
+		"-overlay-ip", "10.99.0.3/32",
+		"-node-id", "dave", // disagrees with the key file (carol)
+	)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("expected non-zero exit on node-id mismatch; output:\n%s", out)
+	}
+	if !strings.Contains(string(out), "dave") || !strings.Contains(string(out), "carol") {
+		t.Errorf("expected mismatch message naming dave and carol; got:\n%s", out)
+	}
+}
+
 // ---------- test helpers --------------------------------------------------
 
 func newSignerKey(t *testing.T, id string) (*keys.Identity, ed25519.PublicKey) {
