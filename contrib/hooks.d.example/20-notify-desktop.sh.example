@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# 20-notify-desktop.sh -- pop a desktop notification when the ledger advances.
+#
+# Requires libnotify (`notify-send`). On Wayland sessions the systemd unit
+# may not have access to the user's session bus; in that case run sync as
+# the user instead, or use a Slack/email hook (see 40-slack.sh.example).
+
+set -euo pipefail
+
+case "${TFNET_EVENT:-}" in
+  post-update) ;;
+  error) ;;
+  *) exit 0 ;;
+esac
+
+command -v notify-send >/dev/null 2>&1 || exit 0
+
+case "$TFNET_EVENT" in
+  post-update)
+    title="tfnet updated"
+    body="added: ${TFNET_ADDED:-(none)}  removed: ${TFNET_REMOVED:-(none)}"
+    ;;
+  error)
+    title="tfnet sync FAILED"
+    body="${TFNET_ERROR:-unknown error}"
+    ;;
+esac
+
+notify-send -u normal -a tfnet "$title" "$body"

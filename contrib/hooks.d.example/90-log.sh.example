@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#
+# 90-log.sh -- write every sync event to a local log file.
+# Useful as a low-overhead audit trail for the *sync* layer
+# (the audit.jsonl produced by tfnet itself records ledger ops).
+
+set -euo pipefail
+
+LOG_FILE="${TFNET_SYNC_LOG:-/var/log/tfnet/sync.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
+
+printf '%s event=%s self=%s old=%s new=%s added=[%s] removed=[%s] hooks=%s err=%q\n' \
+    "$(date -Is)" \
+    "${TFNET_EVENT:-?}" \
+    "${TFNET_SELF:-?}" \
+    "${TFNET_OLD_HEAD:0:12}" \
+    "${TFNET_NEW_HEAD:0:12}" \
+    "${TFNET_ADDED:-}" \
+    "${TFNET_REMOVED:-}" \
+    "${TFNET_HOOKS:-}" \
+    "${TFNET_ERROR:-}" \
+    >> "$LOG_FILE"

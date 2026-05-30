@@ -72,7 +72,7 @@ func runRenderWG(args []string) {
 		"ledger_seq", state.NextSeq,
 		"out", outputDest(*out),
 	)
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action: "render.wg",
 		Actor:  *self,
 		Details: map[string]any{
@@ -116,7 +116,7 @@ func runRenderFRR(args []string) {
 		"ledger_seq", state.NextSeq,
 		"out", outputDest(*out),
 	)
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action: "render.frr",
 		Actor:  *self,
 		Details: map[string]any{

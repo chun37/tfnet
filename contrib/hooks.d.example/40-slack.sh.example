@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+#
+# 40-slack.sh -- post tfnet sync events to a Slack incoming webhook.
+#
+# Install:
+#   1. Create an incoming webhook in your workspace.
+#   2. Save its URL to /etc/tfnet/slack-webhook (mode 0600).
+#   3. cp this file to /etc/tfnet/hooks.d/40-slack.sh and chmod +x.
+
+set -euo pipefail
+
+WEBHOOK_FILE="${TFNET_SLACK_WEBHOOK_FILE:-/etc/tfnet/slack-webhook}"
+[ -r "$WEBHOOK_FILE" ] || exit 0
+
+URL=$(cat "$WEBHOOK_FILE")
+HOST=$(hostname -f 2>/dev/null || hostname)
+
+case "${TFNET_EVENT:-}" in
+  post-update)
+    text=":satellite: tfnet on \`$HOST\` (self=\`${TFNET_SELF:-?}\`)\n• head: \`${TFNET_OLD_HEAD:0:12}\` → \`${TFNET_NEW_HEAD:0:12}\`\n• added: \`${TFNET_ADDED:-(none)}\`\n• removed: \`${TFNET_REMOVED:-(none)}\`"
+    ;;
+  error)
+    text=":rotating_light: tfnet sync FAILED on \`$HOST\`: ${TFNET_ERROR:-unknown}"
+    ;;
+  *) exit 0 ;;
+esac
+
+# Slack expects JSON with a "text" field.
+payload=$(printf '{"text": %s}' "$(printf '%s' "$text" | jq -Rs .)")
+curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$URL" >/dev/null

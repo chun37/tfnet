@@ -70,7 +70,7 @@ func runLedgerInit(args []string) {
 	dir := fs.String("ledger", "", "ledger directory")
 	_ = fs.Parse(args)
 	st := openStore(ledgerDir(*dir))
-	audit.Log(st.Dir, audit.Event{Action: "ledger.init"})
+	audit.Log(audit.Event{LedgerDir: st.Dir, Action: "ledger.init"})
 	fmt.Printf("ledger initialised at %s\n", st.Dir)
 }
 
@@ -137,7 +137,7 @@ func runLedgerGenesis(args []string) {
 		subjects = append(subjects, s.NodeID)
 	}
 	sort.Strings(subjects)
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action:    "ledger.propose.genesis",
 		Seq:       audit.Seq(0),
 		Op:        string(ledger.OpGenesis),
@@ -188,7 +188,7 @@ func runLedgerProposeAdd(args []string) {
 		die("save pending: %v", err)
 	}
 	h, _ := e.HashHex()
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action:    "ledger.propose.add",
 		Seq:       audit.Seq(e.Seq),
 		Op:        string(ledger.OpAdd),
@@ -231,7 +231,7 @@ func runLedgerProposeRemove(args []string) {
 		die("save pending: %v", err)
 	}
 	h, _ := e.HashHex()
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action:    "ledger.propose.remove",
 		Seq:       audit.Seq(e.Seq),
 		Op:        string(ledger.OpRemove),
@@ -249,21 +249,21 @@ func runLedgerSign(args []string) {
 	fs := flag.NewFlagSet("ledger sign", flag.ExitOnError)
 	dir := fs.String("ledger", "", "ledger directory (for audit log; optional)")
 	keyPath := fs.String("key", "", "identity key file (required)")
-	out := fs.String("out", "", "write a standalone signature file instead of editing the pending entry")
+	out := fs.String("out", "", "write a standalone sig file instead of dropping into <pending>/sigs/")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 || *keyPath == "" {
-		die("usage: tfnet ledger sign -key <id.json> [-out <sig.json>] <pending.json>")
+		die("usage: tfnet ledger sign -key <id.json> [-out <sig.json>] <pending_dir>")
 	}
 	id, err := keys.LoadIdentity(*keyPath)
 	if err != nil {
 		die("load key: %v", err)
 	}
-	path := fs.Arg(0)
-	e, err := ledger.LoadEntryFile(path)
+	pendingDir := fs.Arg(0)
+	p, err := ledger.LoadPending(pendingDir)
 	if err != nil {
-		die("load entry: %v", err)
+		die("load pending dir: %v", err)
 	}
-	h, err := e.Hash()
+	h, err := p.Entry.Hash()
 	if err != nil {
 		die("hash entry: %v", err)
 	}
@@ -273,44 +273,34 @@ func runLedgerSign(args []string) {
 	}
 	sigB64 := base64.StdEncoding.EncodeToString(sig)
 	auditDir := ledgerDirIfExists(*dir)
-	tflog.Info("sign", "node_id", id.NodeID, "entry_hash", hex32(h), "pending", path)
+	tflog.Info("sign", "node_id", id.NodeID, "entry_hash", hex32(h), "pending", pendingDir)
+
+	sf := ledger.SigFile{NodeID: id.NodeID, EntryHash: hex32(h), Signature: sigB64}
+
 	if *out != "" {
-		s := struct {
-			NodeID    string `json:"node_id"`
-			EntryHash string `json:"entry_hash"`
-			Signature string `json:"signature"`
-		}{id.NodeID, hex32(h), sigB64}
-		b, _ := json.MarshalIndent(s, "", "  ")
+		b, _ := json.MarshalIndent(sf, "", "  ")
 		if err := os.WriteFile(*out, append(b, '\n'), 0o600); err != nil {
 			die("write %s: %v", *out, err)
 		}
-		audit.Log(auditDir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: auditDir,
 			Action:    "ledger.sign.detached",
 			Actor:     id.NodeID,
 			EntryHash: hex32(h),
-			Details:   map[string]any{"sig_path": *out, "pending_path": path},
+			Details:   map[string]any{"sig_path": *out, "pending_path": pendingDir},
 		})
 		fmt.Printf("signature written: %s\n", *out)
 		return
 	}
-	if e.Approvals == nil {
-		e.Approvals = map[string]string{}
+	if err := p.SaveSig(sf); err != nil {
+		die("save sig: %v", err)
 	}
-	if existing, ok := e.Approvals[id.NodeID]; ok && existing == sigB64 {
-		fmt.Printf("already signed by %s; no change\n", id.NodeID)
-		return
-	}
-	e.Approvals[id.NodeID] = sigB64
-	if err := ledger.SaveEntryFile(path, e); err != nil {
-		die("write %s: %v", path, err)
-	}
-	audit.Log(auditDir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: auditDir,
 		Action:    "ledger.sign.inplace",
 		Actor:     id.NodeID,
 		EntryHash: hex32(h),
-		Details:   map[string]any{"pending_path": path},
+		Details:   map[string]any{"pending_path": pendingDir, "sig_path": p.SigFilePath(id.NodeID)},
 	})
-	fmt.Printf("signed %s as %s\n", path, id.NodeID)
+	fmt.Printf("signed %s as %s (-> %s)\n", pendingDir, id.NodeID, p.SigFilePath(id.NodeID))
 }
 
 // ---- merge ----
@@ -320,19 +310,16 @@ func runLedgerMerge(args []string) {
 	dir := fs.String("ledger", "", "ledger directory (for audit log; optional)")
 	_ = fs.Parse(args)
 	if fs.NArg() < 2 {
-		die("usage: tfnet ledger merge [-ledger DIR] <pending.json> <sig.json> [<sig.json>...]")
+		die("usage: tfnet ledger merge [-ledger DIR] <pending_dir> <sig.json> [<sig.json>...]")
 	}
-	path := fs.Arg(0)
-	e, err := ledger.LoadEntryFile(path)
+	pendingDir := fs.Arg(0)
+	p, err := ledger.LoadPending(pendingDir)
 	if err != nil {
-		die("load entry: %v", err)
+		die("load pending dir: %v", err)
 	}
-	h, err := e.HashHex()
+	h, err := p.Entry.HashHex()
 	if err != nil {
 		die("hash entry: %v", err)
-	}
-	if e.Approvals == nil {
-		e.Approvals = map[string]string{}
 	}
 	auditDir := ledgerDirIfExists(*dir)
 	var merged []string
@@ -341,11 +328,7 @@ func runLedgerMerge(args []string) {
 		if err != nil {
 			die("read %s: %v", sp, err)
 		}
-		var s struct {
-			NodeID    string `json:"node_id"`
-			EntryHash string `json:"entry_hash"`
-			Signature string `json:"signature"`
-		}
+		var s ledger.SigFile
 		if err := json.Unmarshal(b, &s); err != nil {
 			die("parse %s: %v", sp, err)
 		}
@@ -355,17 +338,16 @@ func runLedgerMerge(args []string) {
 		if s.EntryHash != "" && s.EntryHash != h {
 			die("%s: entry_hash mismatch (sig is for a different entry)", sp)
 		}
-		e.Approvals[s.NodeID] = s.Signature
+		if err := p.SaveSig(s); err != nil {
+			die("save sig from %s: %v", sp, err)
+		}
 		merged = append(merged, s.NodeID)
-		fmt.Printf("merged signature from %s\n", s.NodeID)
+		fmt.Printf("merged signature from %s -> %s\n", s.NodeID, p.SigFilePath(s.NodeID))
 	}
-	if err := ledger.SaveEntryFile(path, e); err != nil {
-		die("write %s: %v", path, err)
-	}
-	audit.Log(auditDir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: auditDir,
 		Action:    "ledger.merge",
 		EntryHash: h,
-		Details:   map[string]any{"pending_path": path, "merged_from": merged},
+		Details:   map[string]any{"pending_path": pendingDir, "merged_from": merged},
 	})
 }
 
@@ -376,32 +358,34 @@ func runLedgerShow(args []string) {
 	dir := fs.String("ledger", "", "ledger directory")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		die("usage: tfnet ledger show [-ledger DIR] <pending.json>")
+		die("usage: tfnet ledger show [-ledger DIR] <pending_dir>")
 	}
 	st := openStore(ledgerDir(*dir))
 	state := replay(st)
-	e, err := ledger.LoadEntryFile(fs.Arg(0))
+	p, err := ledger.LoadPending(fs.Arg(0))
 	if err != nil {
-		die("load entry: %v", err)
+		die("load pending dir: %v", err)
 	}
+	e := p.Entry
 	h, err := e.HashHex()
 	if err != nil {
 		die("hash entry: %v", err)
 	}
-	fmt.Printf("entry_hash: %s\n", h)
-	fmt.Printf("seq:        %d\n", e.Seq)
-	fmt.Printf("op:         %s\n", e.Op)
-	fmt.Printf("prev_hash:  %s\n", e.PrevHash)
+	fmt.Printf("pending_dir: %s\n", p.Dir)
+	fmt.Printf("entry_hash:  %s\n", h)
+	fmt.Printf("seq:         %d\n", e.Seq)
+	fmt.Printf("op:          %s\n", e.Op)
+	fmt.Printf("prev_hash:   %s\n", e.PrevHash)
 	printRequired(state, e)
 	if len(e.Approvals) > 0 {
-		fmt.Println("approvals (already collected):")
+		fmt.Println("collected signatures:")
 		ids := make([]string, 0, len(e.Approvals))
 		for id := range e.Approvals {
 			ids = append(ids, id)
 		}
 		sort.Strings(ids)
 		for _, id := range ids {
-			fmt.Printf("  - %s\n", id)
+			fmt.Printf("  - %s  (%s)\n", id, p.SigFilePath(id))
 		}
 	}
 }
@@ -411,37 +395,38 @@ func runLedgerShow(args []string) {
 func runLedgerCommit(args []string) {
 	fs := flag.NewFlagSet("ledger commit", flag.ExitOnError)
 	dir := fs.String("ledger", "", "ledger directory")
-	keep := fs.Bool("keep-pending", false, "do not delete pending file after commit")
+	keep := fs.Bool("keep-pending", false, "do not delete pending dir after commit")
 	_ = fs.Parse(args)
 	if fs.NArg() != 1 {
-		die("usage: tfnet ledger commit [-ledger DIR] <pending.json>")
+		die("usage: tfnet ledger commit [-ledger DIR] <pending_dir>")
 	}
 	st := openStore(ledgerDir(*dir))
 	state := replay(st)
-	path := fs.Arg(0)
-	e, err := ledger.LoadEntryFile(path)
+	pendingDir := fs.Arg(0)
+	p, err := ledger.LoadPending(pendingDir)
 	if err != nil {
-		die("load entry: %v", err)
+		die("load pending dir: %v", err)
 	}
+	e := p.Entry
 	h, _ := e.HashHex()
 	target := ""
 	if e.Subject != nil {
 		target = e.Subject.NodeID
 	}
 	if err := state.Apply(e); err != nil {
-		audit.Log(st.Dir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: st.Dir,
 			Action:    "ledger.commit.rejected",
 			Seq:       audit.Seq(e.Seq),
 			Op:        string(e.Op),
 			Target:    target,
 			EntryHash: h,
 			Error:     err.Error(),
-			Details:   map[string]any{"pending_path": path},
+			Details:   map[string]any{"pending_path": pendingDir},
 		})
 		die("validate: %v", err)
 	}
 	if err := st.Append(e); err != nil {
-		audit.Log(st.Dir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: st.Dir,
 			Action:    "ledger.commit.write_failed",
 			Seq:       audit.Seq(e.Seq),
 			Op:        string(e.Op),
@@ -452,14 +437,14 @@ func runLedgerCommit(args []string) {
 		die("append to log: %v", err)
 	}
 	if !*keep {
-		_ = os.Remove(path)
+		_ = p.Remove()
 	}
 	approvers := make([]string, 0, len(e.Approvals))
 	for id := range e.Approvals {
 		approvers = append(approvers, id)
 	}
 	sort.Strings(approvers)
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action:    "ledger.commit",
 		Seq:       audit.Seq(e.Seq),
 		Op:        string(e.Op),
@@ -467,7 +452,7 @@ func runLedgerCommit(args []string) {
 		EntryHash: h,
 		Details: map[string]any{
 			"approvers":    approvers,
-			"pending_path": path,
+			"pending_path": pendingDir,
 		},
 	})
 	fmt.Printf("committed seq=%d op=%s\n", e.Seq, e.Op)
@@ -534,13 +519,13 @@ func runLedgerVerify(args []string) {
 	st := openStore(ledgerDir(*dir))
 	state, entries, err := st.Replay()
 	if err != nil {
-		audit.Log(st.Dir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: st.Dir,
 			Action: "ledger.verify.failed",
 			Error:  err.Error(),
 		})
 		die("verify: %v", err)
 	}
-	audit.Log(st.Dir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: st.Dir,
 		Action: "ledger.verify.ok",
 		Details: map[string]any{
 			"entries":  len(entries),

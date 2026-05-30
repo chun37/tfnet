@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# 10-restart-tfnet.sh -- reconcile the running overlay with the new ledger.
+#
+# `tfnet start` is idempotent: re-running it on an already-up overlay just
+# hot-syncs the new peer set into wg via `wg syncconf`, plus reloads FRR.
+# So we only need to invoke it when something actually changed.
+#
+# Install: cp to /etc/tfnet/hooks.d/10-restart-tfnet.sh and `chmod +x`.
+
+set -euo pipefail
+
+case "${TFNET_EVENT:-}" in
+  post-update) ;;       # something changed; reconcile
+  *) exit 0 ;;          # pre-sync / no-change / error -- nothing to do
+esac
+
+if [ -z "${TFNET_SELF:-}" ]; then
+    echo "[hook] TFNET_SELF not set; skipping restart" >&2
+    exit 0
+fi
+
+# Where the wg key lives is site-specific. The systemd unit is the natural
+# place to standardise the path; here we trust the env or fall back.
+WG_KEY="${TFNET_WG_KEY:-/etc/tfnet/wg.json}"
+
+echo "[hook] reconciling tfnet (added=${TFNET_ADDED:-} removed=${TFNET_REMOVED:-})"
+exec tfnet start \
+    -self "$TFNET_SELF" \
+    -wg-key "$WG_KEY" \
+    -ledger "$TFNET_LEDGER_DIR"

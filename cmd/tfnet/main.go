@@ -17,11 +17,15 @@ import (
 	"fmt"
 	"os"
 
+	"tfnet/internal/audit"
 	"tfnet/internal/tflog"
 )
 
 // globalLogOpts are populated from the leading flags consumed by parseGlobalFlags.
-var globalLogOpts tflog.Options
+var (
+	globalLogOpts   tflog.Options
+	globalAuditFile string // empty -> audit.DefaultPath() is used
+)
 
 // parseGlobalFlags peels off any -log-level / -log-format / -log-file flags
 // that appear *before* the subcommand. Returns the remaining args (subcommand
@@ -31,6 +35,7 @@ func parseGlobalFlags(args []string) []string {
 	fs.StringVar(&globalLogOpts.Level, "log-level", "info", "log level: debug|info|warn|error")
 	fs.StringVar(&globalLogOpts.Format, "log-format", "text", "log format: text|json")
 	fs.StringVar(&globalLogOpts.File, "log-file", "", "log destination file ('' or '-' = stderr)")
+	fs.StringVar(&globalAuditFile, "audit-file", "", "audit log path (default: see audit.DefaultPath; 'off' to disable)")
 	// Stop at the first non-flag token: that is the subcommand.
 	// flag.FlagSet doesn't natively support that, so we walk args ourselves.
 	i := 0
@@ -39,7 +44,8 @@ func parseGlobalFlags(args []string) []string {
 		switch a {
 		case "-log-level", "--log-level",
 			"-log-format", "--log-format",
-			"-log-file", "--log-file":
+			"-log-file", "--log-file",
+			"-audit-file", "--audit-file":
 			if i+1 >= len(args) {
 				fmt.Fprintf(os.Stderr, "tfnet: flag %s requires a value\n", a)
 				os.Exit(2)
@@ -68,7 +74,7 @@ func trimDash(s string) string {
 
 func isGlobalFlag(s string) bool {
 	switch trimDash(s) {
-	case "log-level", "log-format", "log-file":
+	case "log-level", "log-format", "log-file", "audit-file":
 		return true
 	}
 	return false
@@ -116,16 +122,20 @@ Commands:
   stop      Tear the overlay down
   status    Show wg / vxlan / bridge / BGP-EVPN state
 
+  sync      git pull the ledger repo, verify, diff members, run hooks.d/*
+
 Global flags (must precede the subcommand):
   -log-level  debug|info|warn|error (default info)
   -log-format text|json             (default text)
   -log-file   path                  ('' or '-' = stderr)
+  -audit-file path                  (default: see audit.DefaultPath; 'off' to disable)
 
 Per-subcommand:
   -ledger <dir>   Ledger directory (default $TFNET_LEDGER or ./ledger)
 
-Every ledger-mutating action also appends a structured record to
-<ledger>/audit.jsonl for traceability.
+Every operation also appends a structured record to the host-local
+audit log (default /var/log/tfnet/audit.jsonl for root, otherwise
+$XDG_STATE_HOME/tfnet/audit.jsonl).
 `)
 }
 
@@ -138,11 +148,19 @@ func main() {
 		fmt.Fprintf(os.Stderr, "tfnet: logging to %s\n", dest)
 	}
 	defer tflog.Close()
+
+	// Audit log destination: -audit-file flag wins, else env, else default.
+	auditPath := globalAuditFile
+	if auditPath == "" {
+		auditPath = audit.DefaultPath()
+	}
+	audit.Init(auditPath)
+
 	if len(rest) == 0 {
 		usage()
 		os.Exit(2)
 	}
-	tflog.Debug("invoke", "argv", os.Args)
+	tflog.Debug("invoke", "argv", os.Args, "audit_file", auditPath)
 	switch rest[0] {
 	case "keys":
 		runKeys(rest[1:])
@@ -156,6 +174,8 @@ func main() {
 		runStop(rest[1:])
 	case "status":
 		runStatus(rest[1:])
+	case "sync":
+		runSync(rest[1:])
 	case "-h", "--help", "help":
 		usage()
 	default:

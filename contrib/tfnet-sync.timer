@@ -1,0 +1,14 @@
+[Unit]
+Description=Periodic tfnet ledger sync
+
+[Timer]
+# First run shortly after boot, then every 2 minutes thereafter.
+# Randomised delay smooths the load if you have many tfnet nodes hitting the
+# same git remote simultaneously.
+OnBootSec=1min
+OnUnitActiveSec=2min
+RandomizedDelaySec=30s
+Unit=tfnet-sync.service
+
+[Install]
+WantedBy=timers.target

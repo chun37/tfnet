@@ -6,7 +6,8 @@
 #   - wireguard, wireguard-tools           (data plane transport)
 #   - frr, frr-pythontools                 (EVPN/iBGP/BFD control plane)
 #   - iproute2 / iproute  (provides 'ip' and 'bridge')
-#   - jq                                   (used by README examples)
+#   - git                                  (required by `tfnet sync`)
+#   - jq, curl                             (used by README examples + Slack hook)
 #
 # Then:
 #   - enables 'bgpd' and 'bfdd' in /etc/frr/daemons
@@ -43,6 +44,7 @@ if command -v apt-get >/dev/null 2>&1; then
         wireguard wireguard-tools \
         frr frr-pythontools \
         iproute2 \
+        git \
         jq curl ca-certificates
 elif command -v dnf >/dev/null 2>&1; then
     log "package manager: dnf"
@@ -50,6 +52,7 @@ elif command -v dnf >/dev/null 2>&1; then
         wireguard-tools \
         frr \
         iproute \
+        git \
         jq curl ca-certificates
 elif command -v pacman >/dev/null 2>&1; then
     log "package manager: pacman"
@@ -57,6 +60,7 @@ elif command -v pacman >/dev/null 2>&1; then
         wireguard-tools \
         frr \
         iproute2 \
+        git \
         jq curl ca-certificates
 else
     warn "no supported package manager (apt/dnf/pacman) found"
@@ -121,14 +125,35 @@ fi
 # ---- systemd unit (optional) ----------------------------------------------
 
 if [ "${SYSTEMD:-0}" = "1" ]; then
-    if [ -f contrib/tfnet@.service ]; then
-        log "installing contrib/tfnet@.service -> /etc/systemd/system/tfnet@.service"
-        $SUDO install -m 0644 contrib/tfnet@.service /etc/systemd/system/tfnet@.service
-        $SUDO systemctl daemon-reload
-        log "now: edit /etc/default/tfnet then: systemctl enable --now tfnet@<node_id>"
-    else
-        warn "contrib/tfnet@.service not present; skipping systemd unit install"
+    for unit in contrib/tfnet@.service contrib/tfnet-sync.service contrib/tfnet-sync.timer; do
+        if [ -f "$unit" ]; then
+            log "installing $unit -> /etc/systemd/system/$(basename "$unit")"
+            $SUDO install -m 0644 "$unit" /etc/systemd/system/"$(basename "$unit")"
+        else
+            warn "$unit not present; skipping"
+        fi
+    done
+    $SUDO systemctl daemon-reload
+
+    log "installing example hooks to /usr/share/tfnet/hooks.d.example/"
+    $SUDO mkdir -p /usr/share/tfnet/hooks.d.example
+    if [ -d contrib/hooks.d.example ]; then
+        $SUDO cp -r contrib/hooks.d.example/. /usr/share/tfnet/hooks.d.example/
     fi
+    $SUDO mkdir -p /etc/tfnet/hooks.d
+
+    cat <<EOM
+
+  next:
+    sudo cp contrib/tfnet.env.example      /etc/default/tfnet
+    sudo cp contrib/tfnet-sync.env.example /etc/default/tfnet-sync
+    sudo vi  /etc/default/tfnet /etc/default/tfnet-sync
+    # enable a hook (start the runtime when the ledger changes):
+    sudo install -m 0755 /usr/share/tfnet/hooks.d.example/10-restart-tfnet.sh.example \\
+                         /etc/tfnet/hooks.d/10-restart-tfnet.sh
+    sudo systemctl enable --now tfnet@<node_id>
+    sudo systemctl enable --now tfnet-sync.timer
+EOM
 fi
 
 # ---- done ------------------------------------------------------------------

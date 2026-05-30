@@ -1,0 +1,19 @@
+[Unit]
+Description=tfnet ledger sync (one shot)
+Documentation=https://github.com/tfnet/tfnet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Edit /etc/default/tfnet-sync to set TFNET_SYNC_OPTS, e.g.:
+#   TFNET_SYNC_OPTS=-repo /var/lib/tfnet/repo -self alice -hooks-dir /etc/tfnet/hooks.d
+EnvironmentFile=-/etc/default/tfnet-sync
+
+ExecStart=/usr/local/bin/tfnet sync $TFNET_SYNC_OPTS
+
+# A single failed sync should not block subsequent retries (the timer fires
+# again). Keep stderr/stdout flowing to journal for easy `journalctl -u`.
+StandardOutput=journal
+StandardError=journal

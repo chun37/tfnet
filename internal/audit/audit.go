@@ -1,11 +1,18 @@
-// Package audit writes an append-only forensic log of ledger operations.
+// Package audit writes an append-only forensic log of tfnet operations.
 //
-// The audit log lives at <ledger_dir>/audit.jsonl. One JSON object per line,
-// timestamped, identifying the actor (best-effort: OS user + host), the
-// operation and its target hash. It is independent from the operational slog
-// stream and is meant to remain in the ledger directory permanently — co-
-// distributed with the ledger so reviewers can reconstruct who proposed,
-// signed, merged, and committed each entry.
+// One JSON object per line, timestamped, identifying the actor (best-effort:
+// OS user + host), the operation and its target hash. The audit log is
+// **local to each host** -- never committed to a shared git repo -- so it
+// remains an accurate record of what THIS host did, free of merge conflicts.
+//
+// Default location:
+//
+//	root            /var/log/tfnet/audit.jsonl
+//	non-root        $XDG_STATE_HOME/tfnet/audit.jsonl
+//	                (typically ~/.local/state/tfnet/audit.jsonl)
+//
+// Override via the global `-audit-file <path>` flag or `TFNET_AUDIT_FILE`.
+// Set to "-" or "off" to disable file writes (slog mirror still happens).
 //
 // Audit failures never abort the caller: a degraded log is preferable to a
 // failed legitimate operation. Failures are surfaced via slog at WARN level.
@@ -13,11 +20,11 @@ package audit
 
 import (
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/user"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -36,11 +43,43 @@ type Event struct {
 	Error     string         `json:"error,omitempty"`
 }
 
-// Log writes ev to <ledgerDir>/audit.jsonl. ledgerDir may be empty if the
-// operation is not associated with a specific ledger (audit is then a no-op
-// at the file level, but the event is still surfaced via slog so it isn't
-// silently lost).
-func Log(ledgerDir string, ev Event) {
+var (
+	mu       sync.Mutex
+	filePath string
+)
+
+// Init sets the destination file. Empty / "-" / "off" disables file writes.
+// Safe to call from main during process startup.
+func Init(path string) {
+	mu.Lock()
+	defer mu.Unlock()
+	if path == "-" || path == "off" {
+		filePath = ""
+		return
+	}
+	filePath = path
+}
+
+// DefaultPath returns the conventional audit log path for this user/euid,
+// or "" if neither root-owned /var/log nor a state dir is determinable.
+func DefaultPath() string {
+	if env := os.Getenv("TFNET_AUDIT_FILE"); env != "" {
+		return env
+	}
+	if os.Geteuid() == 0 {
+		return "/var/log/tfnet/audit.jsonl"
+	}
+	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
+		return filepath.Join(xdg, "tfnet", "audit.jsonl")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".local", "state", "tfnet", "audit.jsonl")
+	}
+	return ""
+}
+
+// Log emits an audit event. ev.Time / ev.Actor / ev.Host are filled in if absent.
+func Log(ev Event) {
 	if ev.Time == "" {
 		ev.Time = time.Now().UTC().Format(time.RFC3339Nano)
 	}
@@ -54,9 +93,9 @@ func Log(ledgerDir string, ev Event) {
 			ev.Host = h
 		}
 	}
-	ev.LedgerDir = ledgerDir
 
-	// Mirror to slog so operators see it on stderr too.
+	// Always mirror to slog so the event is visible even when no audit
+	// file is configured.
 	args := []any{
 		slog.String("action", ev.Action),
 		slog.String("actor", ev.Actor),
@@ -80,13 +119,19 @@ func Log(ledgerDir string, ev Event) {
 		slog.Info("audit", args...)
 	}
 
-	if ledgerDir == "" {
+	mu.Lock()
+	p := filePath
+	mu.Unlock()
+	if p == "" {
 		return
 	}
-	path := filepath.Join(ledgerDir, "audit.jsonl")
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		slog.Warn("audit log mkdir failed", "path", p, "error", err)
+		return
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		slog.Warn("audit log open failed", "path", path, "error", err)
+		slog.Warn("audit log open failed", "path", p, "error", err)
 		return
 	}
 	defer f.Close()
@@ -96,7 +141,7 @@ func Log(ledgerDir string, ev Event) {
 		return
 	}
 	if _, err := f.Write(append(b, '\n')); err != nil {
-		slog.Warn("audit log write failed", "path", path, "error", err)
+		slog.Warn("audit log write failed", "path", p, "error", err)
 	}
 }
 
@@ -108,13 +153,4 @@ func short(h string) string {
 		return h[:16]
 	}
 	return h
-}
-
-// MustNotErr returns a string for the error (or empty if nil) — used by
-// callers to populate Event.Error in deferred patterns.
-func MustNotErr(err error) string {
-	if err == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v", err)
 }

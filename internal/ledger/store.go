@@ -1,7 +1,6 @@
 package ledger
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -101,16 +100,29 @@ func (s *Store) Append(e *Entry) error {
 	return f.Sync()
 }
 
-// SavePending stores a proposed entry under <pending>/<seq>-<hash8>.json.
-// Returns the absolute path written.
+// SavePending stores a proposed entry as a directory:
+//
+//	<pending>/<seq>-<hash12>/
+//	    entry.json     The entry (with empty approvals).
+//	    sigs/          Empty; signers populate this dir.
+//
+// Returns the absolute path of the directory.
 func (s *Store) SavePending(e *Entry) (string, error) {
-	h, err := e.Hash()
+	name, err := PendingName(e)
 	if err != nil {
 		return "", err
 	}
-	name := fmt.Sprintf("%06d-%s.json", e.Seq, hex.EncodeToString(h[:6]))
-	path := s.PendingPath(name)
-	return path, SaveEntryFile(path, e)
+	dir := s.PendingPath(name)
+	if err := os.MkdirAll(filepath.Join(dir, "sigs"), 0o700); err != nil {
+		return "", err
+	}
+	// entry.json must never carry approvals -- those live in sigs/.
+	bare := *e
+	bare.Approvals = nil
+	if err := SaveEntryFile(filepath.Join(dir, "entry.json"), &bare); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // LoadEntryFile reads a single entry from a JSON file (used for pending entries).

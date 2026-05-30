@@ -100,7 +100,7 @@ func runStart(args []string) {
 	}
 	cfg := f.toConfig()
 	if err := runtime.Start(cfg); err != nil {
-		audit.Log(cfg.LedgerDir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: cfg.LedgerDir,
 			Action: "runtime.start.failed",
 			Actor:  cfg.SelfNodeID,
 			Error:  err.Error(),
@@ -113,7 +113,7 @@ func runStart(args []string) {
 		})
 		die("start: %v", err)
 	}
-	audit.Log(cfg.LedgerDir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: cfg.LedgerDir,
 		Action: "runtime.start",
 		Actor:  cfg.SelfNodeID,
 		Details: map[string]any{
@@ -135,14 +135,14 @@ func runStop(args []string) {
 	_ = fs.Parse(args)
 	cfg := f.toConfig()
 	if err := runtime.Stop(cfg); err != nil {
-		audit.Log(cfg.LedgerDir, audit.Event{
+		audit.Log(audit.Event{LedgerDir: cfg.LedgerDir,
 			Action: "runtime.stop.failed",
 			Actor:  cfg.SelfNodeID,
 			Error:  err.Error(),
 		})
 		die("stop: %v", err)
 	}
-	audit.Log(cfg.LedgerDir, audit.Event{
+	audit.Log(audit.Event{LedgerDir: cfg.LedgerDir,
 		Action: "runtime.stop",
 		Actor:  cfg.SelfNodeID,
 		Details: map[string]any{
